@@ -1,0 +1,19 @@
+# Dependencies
+node_modules/
+
+# Auth session (contains your WhatsApp login - never share this!)
+.wwebjs_auth/
+.wwebjs_cache/
+
+# Environment variables (contains private config)
+.env
+
+# Media cache
+cache/
+
+# Compiled output
+dist/
+
+# Logs
+*.log
+npm-debug.log*
