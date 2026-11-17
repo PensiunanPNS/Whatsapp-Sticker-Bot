@@ -1,4 +1,4 @@
-import { Message, MessageMedia } from 'whatsapp-web.js';
+import { Client, Message, MessageMedia } from 'whatsapp-web.js';
 import ffmpegPath from '@ffmpeg-installer/ffmpeg';
 import ffmpeg from 'fluent-ffmpeg';
 
@@ -9,16 +9,92 @@ import mime from 'mime-types';
 // Set ffmpeg path
 ffmpeg.setFfmpegPath(ffmpegPath.path);
 
+/**
+ * Custom media download that bypasses the broken Store.Msg.get() lookup.
+ * Instead of looking up the message by ID in the browser Store (which fails
+ * due to WhatsApp Web's ID format change), we pass the media properties
+ * directly from the message data and call the download manager ourselves.
+ */
+async function downloadMediaDirect(msg: Message): Promise<MessageMedia | null> {
+    const client = (msg as any).client as Client;
+    const rawData = (msg as any)._data;
+
+    if (!rawData || !rawData.directPath) {
+        return null;
+    }
+
+    const mediaInfo = {
+        directPath: rawData.directPath,
+        encFilehash: rawData.encFilehash,
+        filehash: rawData.filehash,
+        mediaKey: rawData.mediaKey,
+        mediaKeyTimestamp: rawData.mediaKeyTimestamp,
+        type: rawData.type,
+        mimetype: rawData.mimetype,
+        filename: rawData.filename,
+        size: rawData.size,
+    };
+
+    const result = await (client as any).pupPage.evaluate(async (info: any) => {
+        try {
+            const mockQpl = {
+                addAnnotations: function () { return this; },
+                addPoint: function () { return this; }
+            };
+            const decryptedMedia = await (window as any).Store.DownloadManager.downloadAndMaybeDecrypt({
+                directPath: info.directPath,
+                encFilehash: info.encFilehash,
+                filehash: info.filehash,
+                mediaKey: info.mediaKey,
+                mediaKeyTimestamp: info.mediaKeyTimestamp,
+                type: info.type,
+                signal: (new AbortController).signal,
+                downloadQpl: mockQpl
+            });
+
+            const data = await (window as any).WWebJS.arrayBufferToBase64Async(decryptedMedia);
+
+            return {
+                data,
+                mimetype: info.mimetype,
+                filename: info.filename,
+                filesize: info.size
+            };
+        } catch (e: any) {
+            if (e.status && e.status === 404) return null;
+            throw e;
+        }
+    }, mediaInfo);
+
+    if (!result) return null;
+    return new MessageMedia(result.mimetype, result.data, result.filename, result.filesize);
+}
+
 export const handleMessage = async (msg: Message) => {
     let targetMsg = msg;
     if (msg.hasQuotedMsg) {
-        targetMsg = await msg.getQuotedMessage();
+        try {
+            targetMsg = await msg.getQuotedMessage();
+        } catch (err) {
+            console.error('Error getting quoted message:', err);
+            await msg.reply('Gagal mengambil pesan yang direply. Coba kirim ulang medianya dengan caption /sticker.');
+            return;
+        }
     }
 
     if (msg.body === '/sticker') {
         if (targetMsg.hasMedia) {
             try {
-                const media = await targetMsg.downloadMedia();
+                // Try our custom direct download first, fall back to library method
+                let media: MessageMedia | null | undefined = null;
+                try {
+                    media = await downloadMediaDirect(targetMsg);
+                    console.log('Media downloaded via direct method');
+                } catch (directErr) {
+                    console.warn('Direct download failed, trying library method:', directErr);
+                    media = await targetMsg.downloadMedia();
+                }
+
                 if (media) {
                     let stickerMedia = media;
 
@@ -39,6 +115,8 @@ export const handleMessage = async (msg: Message) => {
                         stickerName: process.env.STICKER_NAME || 'Sticker'
                     });
                     console.log(`Sent sticker to ${msg.from}`);
+                } else {
+                    await msg.reply('Gagal mendownload media. Coba kirim ulang medianya.');
                 }
             } catch (error) {
                 console.error('Error handling media:', error);
